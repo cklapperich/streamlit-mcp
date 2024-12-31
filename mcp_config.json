@@ -1,0 +1,13 @@
+{
+    "globalShortcut": "",
+    "mcpServers": {
+      "filesystem": {
+        "command": "C:\\Program Files\\nodejs\\node.exe",
+        "args": [
+          "C:\\Users\\cklap\\AppData\\Roaming\\npm\\node_modules\\@modelcontextprotocol\\server-filesystem\\dist\\index.js",
+          "C:\\Users\\cklap\\llama_index\\docs\\docs",
+          "C:\\Users\\cklap\\llama_index\\llama-index-core\\llama_index\\core"
+        ]
+      }
+    }
+  }
