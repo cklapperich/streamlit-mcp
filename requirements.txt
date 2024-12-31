@@ -6,3 +6,5 @@ python-dotenv>=1.0.0
 asyncio>=3.4.3
 BeautifulSoup4
 pytest
+llama-index
+html2text
