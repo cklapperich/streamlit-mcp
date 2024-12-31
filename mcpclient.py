@@ -1,7 +1,6 @@
 import json
 import asyncio
 from typing import Optional, Dict
-from contextlib import AsyncExitStack
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from anthropic import Anthropic
@@ -11,7 +10,6 @@ import os
 class MCPClient:
     def __init__(self):
         self.session: Optional[ClientSession] = None
-        self.exit_stack = AsyncExitStack()
         self.anthropic = Anthropic()
         
     @staticmethod
@@ -25,23 +23,28 @@ class MCPClient:
         args = server_config.get('args', [])
         env = server_config.get('env')
         
+        print(f"Connecting with command: {command}, args: {args}")
+        
         server_params = StdioServerParameters(
             command=command,
             args=args,
             env=env
         )
-        
+
         try:
-            transport = await stdio_client(server_params)
-            self.stdio, self.write = transport
-            self.session = ClientSession(self.stdio, self.write)
-            await self.session.initialize()
-            return await self.session.list_tools()
-        finally:
-            if hasattr(self, 'session') and hasattr(self.session, 'close'):
-                await self.session.close()
-            if hasattr(self, 'stdio') and hasattr(self.stdio, 'close'):
-                await self.stdio.close()
+            print("Establishing stdio connection...")
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    # Initialize the connection
+                    await session.initialize()
+
+                    # List available tools
+                    tools = await session.list_tools()
+                    return tools
+                            
+        except Exception as e:
+            print(f"Connection error: {e}")
+            raise
 
     async def process_query(self, query: str) -> str:
         messages = [{"role": "user", "content": query}]
@@ -96,4 +99,16 @@ class MCPClient:
         return "\n".join(final_text)
 
     async def cleanup(self):
-        await self.exit_stack.aclose()
+        if self.session:
+            await self.session.close()
+        if hasattr(self, 'stdio'):
+            await self.stdio.close()
+
+if __name__=='__main__':
+    async def main():
+        client = MCPClient()
+        config = client.load_config('mcp_config.json')
+        tools = await client.connect_to_server(config['filesystem'])
+        # print(tools)
+
+    asyncio.run(main())
