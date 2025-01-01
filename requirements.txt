@@ -8,3 +8,4 @@ BeautifulSoup4
 pytest
 llama-index
 html2text
+llama-index-llms-openrouter
