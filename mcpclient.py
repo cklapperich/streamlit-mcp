@@ -13,38 +13,39 @@ from typing import List, Dict, Any
 from llama_index.llms.openrouter import OpenRouter
 from llama_index.core.callbacks import CallbackManager
 from tool_callback_handler import ToolCallbackHandler
-
+from mcp_connection import MCPConnection
 class MCPClient:
     def __init__(self, config_path='./mcp_config.json'):
         self.server_params_dict = self._load_config(config_path)
+        self.sessions = {}  # Track connection instances by server name
         
     @staticmethod
     def _load_config(config_path: str) -> Dict[str, StdioServerParameters]:
         with open(config_path, 'r') as f:
             config = json.load(f)
-
+        
         server_params_dict = {}
         server_dict = config.get('mcpServers', {})
-
+        
         for item, server_config in server_dict.items():
             command = server_config.get('command')
             args = server_config.get('args', [])
             env = server_config.get('env')
-
+            
             print(command, args, env)
             server_params = StdioServerParameters(command=command,
-                                                  args=args,
-                                                  env=env)
+                                               args=args,
+                                               env=env)
             server_params_dict[item] = server_params
-
+        
         return server_params_dict
+
     async def _execute_with_session(self, servername: str, operation):
-        """Execute an operation with a fresh session"""
+        """Execute an operation with a persistent session"""
         server_params = self.server_params_dict[servername]
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                return await operation(session)
+        session = await MCPConnection.get_session(server_params)
+        return await operation(session)
+        
 
     async def _get_tools_for_server(self, servername: str) -> List[FunctionTool]:
         """Get a list of tools for a specific MCP server."""
@@ -69,14 +70,14 @@ class MCPClient:
                 tool_functions.append(llama_index_tool)
             
             return tool_functions
-
+        
         return await self._execute_with_session(servername, get_tools)
 
     async def _get_all_tool_functions(self) -> List[FunctionTool]:
         """Get a list of all tool functions from all connected MCP servers."""
         all_tools = []
         for servername in self.server_params_dict:
-            tools = await self._get_tools_for_server(servername)            
+            tools = await self._get_tools_for_server(servername)
             all_tools.extend(tools)
         return all_tools
 
@@ -84,10 +85,14 @@ class MCPClient:
         """Get an agent that can use all tools from all connected MCP servers."""
         if not llm:
             llm = self.llm
-
+        
         tools = await self._get_all_tool_functions()
         agent = ReActAgent.from_tools(tools, llm=llm, callback_manager=callback_manager, verbose=verbose)
-        return agent 
+        return agent
+
+    async def cleanup(self):
+        """Clean up all connections when done"""
+        await MCPConnection.close()
     
 
 if __name__=='__main__':
