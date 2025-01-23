@@ -1,12 +1,12 @@
 # requirements.txt
-streamlit>=1.31.0
+pydantic==2.10.1 # for chainlit
 mcp>=0.1.0
-anthropic>=0.8.0
-python-dotenv>=1.0.0
-asyncio>=3.4.3
+python-dotenv
 BeautifulSoup4
 pytest
 llama-index
 html2text
 llama-index-llms-openrouter
-git+https://github.com/cklapperich/mcp-snowflake-server.git
+chainlit
+# snowflake-snowpark-python
+# git+https://github.com/cklapperich/mcp-snowflake-server.git
