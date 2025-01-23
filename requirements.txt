@@ -9,3 +9,4 @@ pytest
 llama-index
 html2text
 llama-index-llms-openrouter
+git+https://github.com/cklapperich/mcp-snowflake-server.git
