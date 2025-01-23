@@ -1,11 +1,5 @@
 # requirements.txt
 streamlit>=1.31.0
 mcp>=0.1.0
-anthropic>=0.8.0
-python-dotenv>=1.0.0
-asyncio>=3.4.3
-BeautifulSoup4
-pytest
-llama-index
-html2text
-llama-index-llms-openrouter
+httpx
+chainlit
