@@ -1,118 +1,137 @@
-import json
 import asyncio
-from typing import Optional, Dict
+import logging
+import json
+from typing import Dict, Any, Optional, Tuple
+from types import TracebackType
+import chainlit as cl
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
-from anthropic import Anthropic
-from llama_index.core.agent import ReActAgent
-from mcp.types import Tool
-from llama_index.core.llms import LLM
-from llama_index.core.tools import FunctionTool
-from llama_index.core import Settings
-from typing import List, Dict, Any
-from llama_index.llms.openrouter import OpenRouter
-from llama_index.core.callbacks import CallbackManager
-from tool_callback_handler import ToolCallbackHandler
-from mcp_connection import MCPConnection
+
 class MCPClient:
-    def __init__(self, config_path='./mcp_config.json'):
-        self.server_params_dict = self._load_config(config_path)
-        self.sessions = {}  # Track connection instances by server name
-        
+    def __init__(self, config_path: str = 'mcp_config.json'):
+        self.servers: Dict[str, Any] = {}
+        self.sessions: Dict[str, Any] = {}
+        self._lock = asyncio.Lock()
+        self.logger = logging.getLogger(__name__)
+        self.server_configs = self._load_config(config_path)
+
     @staticmethod
     def _load_config(config_path: str) -> Dict[str, StdioServerParameters]:
         with open(config_path, 'r') as f:
             config = json.load(f)
         
         server_params_dict = {}
-        server_dict = config.get('mcpServers', {})
-        
-        for item, server_config in server_dict.items():
-            command = server_config.get('command')
-            args = server_config.get('args', [])
-            env = server_config.get('env')
-            
-            print(command, args, env)
-            server_params = StdioServerParameters(command=command,
-                                               args=args,
-                                               env=env)
+        for item, server_config in config.get('mcpServers', {}).items():
+            server_params = StdioServerParameters(
+                command=server_config.get('command'),
+                args=server_config.get('args', []),
+                env=server_config.get('env')
+            )
             server_params_dict[item] = server_params
         
         return server_params_dict
 
-    async def _execute_with_session(self, servername: str, operation):
-        """Execute an operation with a persistent session"""
-        server_params = self.server_params_dict[servername]
-        session = await MCPConnection.get_session(server_params)
-        return await operation(session)
-        
-
-    async def _get_tools_for_server(self, servername: str) -> List[FunctionTool]:
-        """Get a list of tools for a specific MCP server."""
-        async def get_tools(session):
-            nextCursor, tools_tuple = await session.list_tools()
-            tools: List[Tool] = tools_tuple[1]
+    async def _start_server(self, server_id: str, server_params: StdioServerParameters) -> bool:
+        async with self._lock:
+            if server_id in self.servers:
+                return False
             
-            tool_functions = []
-            for tool in tools:
-                def create_tool_call_fn(tool=tool):
-                    async def _call_tool(**kwargs):
-                        async def tool_operation(session):
-                            return await session.call_tool(tool.name, kwargs)
-                        return await self._execute_with_session(servername, tool_operation)
-                    return _call_tool
+            try:
+                stdio = stdio_client(server_params)
+                read, write = await stdio.__aenter__()
+                session = await ClientSession(read, write).__aenter__()
                 
-                llama_index_tool = FunctionTool.from_defaults(
-                    async_fn=create_tool_call_fn(),
-                    name=tool.name,
-                    description=tool.description
-                )
-                tool_functions.append(llama_index_tool)
-            
-            return tool_functions
-        
-        return await self._execute_with_session(servername, get_tools)
+                self.servers[server_id] = stdio
+                self.sessions[server_id] = session
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to start server {server_id}: {str(e)}")
+                await self._cleanup_server(server_id)
+                raise
 
-    async def _get_all_tool_functions(self) -> List[FunctionTool]:
-        """Get a list of all tool functions from all connected MCP servers."""
-        all_tools = []
-        for servername in self.server_params_dict:
-            tools = await self._get_tools_for_server(servername)
-            all_tools.extend(tools)
-        return all_tools
+    async def _cleanup_server(self, server_id: str) -> None:
+        async with self._lock:
+            if server_id in self.sessions:
+                session = self.sessions[server_id]
+                del self.sessions[server_id]
+                await session.__aexit__(None, None, None)
 
-    async def get_agent(self, llm=None, callback_manager=None, verbose=False) -> ReActAgent:
-        """Get an agent that can use all tools from all connected MCP servers."""
-        if not llm:
-            llm = self.llm
-        
-        tools = await self._get_all_tool_functions()
-        agent = ReActAgent.from_tools(tools, llm=llm, callback_manager=callback_manager, verbose=verbose)
-        return agent
+            if server_id in self.servers:
+                stdio = self.servers[server_id]
+                del self.servers[server_id]
+                await stdio.__aexit__(None, None, None)
 
-    async def cleanup(self):
-        """Clean up all connections when done"""
-        await MCPConnection.close()
+    async def execute_tool(self, name, parameters_dict=None)-> Tuple[str, str]:
+        """Execute a tool by name and parameters"""
+        if not parameters_dict:
+            parameters_dict = {}
+
+        # Find the server that has the tool
+        names = name.split('_')
+        server_id = names[0]
+        tool_name = '_'.join(names[1:])
+
+        # Execute the tool
+        session = self.sessions[server_id]
+        response = await session.call_tool(tool_name, parameters_dict)
+        meta, content_list, isError = response.meta, response.content, response.isError
+
+        if len(content_list) == 1:
+            result = content_list[0].text
+            type = content_list[0].type
+        else:
+            raise ValueError("in mcpclient.execute_tool, a multipart content list was returned, which is not allowed currently. Response from call: ", 
+                             content_list)
+                
+        """ FUNCTION RESPONSE STRUCTURE
+        meta=None content=[TextContent(type='text', text='Allowed directories:\nc:\\users\\cklap\\streamlit-mcp\\snowflake_docs')] isError=False
+        """
+        return result, type
     
+    async def list_available_tools(self) -> list[Dict[str, Any]]:
+        """List all available tools across all servers in OpenAI function format"""
+        tools = []
+        for server_id, session in self.sessions.items():
+            meta, next_cursor, tools_tuple = await session.list_tools()
 
-if __name__=='__main__':
-    client = MCPClient('mcp_config_windows.json')
-    import nest_asyncio
-    nest_asyncio.apply()
-    async def main():
-        tool_handler = ToolCallbackHandler()
-        callback_manager = CallbackManager([tool_handler])
-        gpt_4o_mini = OpenRouter('anthropic/claude-3.5-sonnet')
+            server_tools = tools_tuple[1]
+            # example tool object in the server tools list:
+            """
+            [Tool(name='read_file', description='Read the complete contents of a file from the file system. Handles various text encodings and provides detailed error messages if the file cannot be read. Use this tool when you need to examine the contents of a single file. Only works within allowed directories.', inputSchema={'type': 'object', 'properties': {'path': {'type': 'string'}}, 'required': ['path'], 'additionalProperties': False, ...]
+            """
+            for tool in server_tools:
+                # Convert MCP tool schema to OpenAI function format
+                function_def = {
+                    "type": "function",
+                    "function": {
+                        "name": f"{server_id}_{tool.name}",  # Prefix with server_id to avoid name conflicts
+                        "description": tool.description,
+                        "parameters": tool.inputSchema
+                    }
+                }
+                
+                tools.append(function_def)
+        
+        return tools
 
-        agent = await client.get_agent(
-            llm=gpt_4o_mini,
-            callback_manager=callback_manager
-        )
+    async def __aenter__(self) -> 'MCPClient':
+        # Start all servers
+        for server_id, params in self.server_configs.items():
+            success = await self._start_server(server_id, params)
+            if not success:
+                self.logger.warning(f"Failed to start server {server_id}")
         
-        response = await agent.achat("Call list allowed directories tool, then call list_directory, then summarize the results.")
+        if not self.sessions:
+            raise RuntimeError("No servers could be started successfully")
         
-        print("Agent Response:", response)
-        # print("\nTool Outputs:", tool_handler.tool_outputs)
-    
-    import asyncio
-    asyncio.run(main())
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: Optional[type[BaseException]],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType]
+    ) -> None:
+        server_ids = list(self.servers.keys())
+        for server_id in server_ids:
+            await self._cleanup_server(server_id)

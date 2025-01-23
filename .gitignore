@@ -4,5 +4,5 @@ __pycache__/
 .DS_Store
 .env.local
 .venv/
-snowflake_docs
 .pytest_cache
+.chainlit
